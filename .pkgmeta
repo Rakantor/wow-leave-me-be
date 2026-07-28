@@ -1,0 +1,4 @@
+package-as: LeaveMeBe
+
+ignore:
+  - release.sh
