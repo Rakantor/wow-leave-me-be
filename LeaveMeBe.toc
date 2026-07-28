@@ -1,0 +1,24 @@
+## Interface: 120007
+## Title: Leave Me Be
+## Notes: Filters unwanted player whispers.
+## Author: Rakantor
+## Version: 0.5.3
+## SavedVariables: LeaveMeBeDB, LeaveMeBeLog
+## Category: Chat
+## Category-deDE: Chat
+## Category-esES: Chat
+## Category-esMX: Chat
+## Category-frFR: Discussion
+## Category-itIT: Chat
+## Category-koKR: 대화
+## Category-ptBR: Bate-papo
+## Category-ruRU: Чат
+## Category-zhCN: 聊天
+## Category-zhTW: 對話
+## IconTexture: Interface\Icons\spell_holy_silence
+## X-Category: Chat/Communication
+
+Core.lua
+Automation.lua
+Filter.lua
+Options.lua
