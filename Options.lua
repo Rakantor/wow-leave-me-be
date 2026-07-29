@@ -50,6 +50,25 @@ local function CreateCheckbox(panel, key, label, description, y, onChanged)
     return checkbox
 end
 
+local function SetCheckboxEnabled(checkbox, enabled)
+    checkbox:SetEnabled(enabled)
+    if enabled then
+        checkbox.labelText:SetFontObject(GameFontNormal)
+        checkbox.descriptionText:SetFontObject(GameFontHighlightSmall)
+    else
+        checkbox.labelText:SetFontObject(GameFontDisable)
+        checkbox.descriptionText:SetFontObject(GameFontDisableSmall)
+    end
+end
+
+local function SetEditBoxEnabled(editBox, enabled)
+    editBox:SetEnabled(enabled)
+    editBox:SetFontObject(enabled and ChatFontNormal or GameFontDisable)
+    if not enabled then
+        editBox:ClearFocus()
+    end
+end
+
 local function CreateMainPanel()
     local panel = CreateFrame("Frame")
     local title = CreateTitle(panel, "Leave Me Be")
@@ -169,15 +188,12 @@ local function CreateMainPanel()
     replyDescription:SetText(
         "Every reply begins with the fixed prefix \""
             .. LMB.autoReplyPrefix
-            .. "\". Customize the text that follows it."
+            .. "\". Use {me} for your name, and "
+            .. "{sender} for the sender's name."
     )
 
-    local prefix = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
-    prefix:SetPoint("TOPLEFT", replyDescription, "BOTTOMLEFT", 0, -15)
-    prefix:SetText(LMB.autoReplyPrefix)
-
     local replyEditBox = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
-    replyEditBox:SetPoint("TOPLEFT", prefix, "BOTTOMLEFT", 4, -9)
+    replyEditBox:SetPoint("TOPLEFT", replyDescription, "BOTTOMLEFT", 4, -15)
     replyEditBox:SetSize(580, 30)
     replyEditBox:SetAutoFocus(false)
     replyEditBox:SetMaxLetters(200)
@@ -245,10 +261,28 @@ local function CreateMainPanel()
         allowContacts = allowContacts,
     }
 
+    local exceptionCheckboxes = {
+        allowByLevel,
+        allowFriends,
+        allowGuild,
+        allowGroup,
+        allowContacts,
+    }
+
     local function Refresh()
         for key, checkbox in pairs(checkboxes) do
             checkbox:SetChecked(LeaveMeBeDB[key])
         end
+        SetCheckboxEnabled(
+            autoBlockPremadeListing,
+            not LeaveMeBeDB.blockAllWhispers
+        )
+        local exceptionsEnabled = LeaveMeBeDB.blockAllWhispers
+            or LeaveMeBeDB.autoBlockPremadeListing
+        for _, checkbox in ipairs(exceptionCheckboxes) do
+            SetCheckboxEnabled(checkbox, exceptionsEnabled)
+        end
+        SetEditBoxEnabled(levelEditBox, exceptionsEnabled)
         LoadMinimumLevel()
         LoadReply()
     end

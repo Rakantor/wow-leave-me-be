@@ -89,6 +89,9 @@ function LMB:SetPremadeAutomationEnabled(enabled)
     else
         self:ReleasePremadeAutomationControl()
     end
+    if self.RefreshMainOptions then
+        self:RefreshMainOptions()
+    end
 end
 
 local eventFrame = CreateFrame("Frame")
