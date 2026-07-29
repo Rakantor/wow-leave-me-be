@@ -3,7 +3,7 @@ local addonName, LMB = ...
 local defaults = {
     blockAllWhispers = false,
     autoBlockPremadeListing = false,
-    autoReplyMessage = "Sorry! Your whisper did not meet my requirements and was not received.",
+    autoReplyMessage = "Sorry, {me} doesn't receive whispers right now!",
     allowByLevel = true,
     minimumLevel = 42,
     allowFriends = true,
@@ -68,8 +68,31 @@ function LMB:IsSecretValue(value)
     return IsSecretValue(value)
 end
 
-function LMB:GetAutoReply()
-    return self.autoReplyPrefix .. " " .. LeaveMeBeDB.autoReplyMessage
+function LMB:GetAutoReply(sender)
+    local playerName = UnitName("player")
+    if self:IsSecretValue(playerName)
+        or self:IsSecretValue(sender)
+        or type(playerName) ~= "string"
+        or type(sender) ~= "string"
+    then
+        return nil
+    end
+
+    local replacements = {
+        player = playerName,
+        me = playerName,
+        myself = playerName,
+        sender = sender,
+        they = sender,
+        them = sender,
+    }
+    local message = LeaveMeBeDB.autoReplyMessage:gsub(
+        "{([%a]+)}",
+        function(token)
+            return replacements[token]
+        end
+    )
+    return self.autoReplyPrefix .. " " .. message
 end
 
 function LMB:IsAutoReply(message)

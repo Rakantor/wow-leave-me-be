@@ -171,6 +171,11 @@ local function SendAutomaticReply(message, sender)
         return
     end
 
+    local reply = LMB:GetAutoReply(sender)
+    if not reply then
+        return
+    end
+
     local senderKey = GetLookupName(sender):lower()
     if autoReplyCooldowns[senderKey] then
         return
@@ -181,7 +186,7 @@ local function SendAutomaticReply(message, sender)
     end)
 
     pendingAutoReplies = pendingAutoReplies + 1
-    C_ChatInfo.SendChatMessage(LMB:GetAutoReply(), "WHISPER", nil, sender)
+    C_ChatInfo.SendChatMessage(reply, "WHISPER", nil, sender)
     C_Timer.After(1, function()
         pendingAutoReplies = math.max(0, pendingAutoReplies - 1)
     end)
