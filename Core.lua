@@ -37,17 +37,66 @@ local function CopyDefaults(source, destination)
     end
 end
 
-local function NormalizeName(name)
+-- Character and realm names never contain spaces once the client has
+-- normalized them, so drop any the player typed rather than saving an entry
+-- that can never match an incoming whisper.
+local function CleanName(name)
     if type(name) ~= "string" then
         return nil
     end
 
-    name = name:match("^%s*(.-)%s*$")
+    name = name:gsub("%s+", "")
     if name == "" then
         return nil
     end
 
-    return name:lower()
+    return name
+end
+
+local function NormalizeName(name)
+    local cleaned = CleanName(name)
+    if not cleaned then
+        return nil
+    end
+
+    return cleaned:lower()
+end
+
+-- Entries saved before names were stripped of spaces can never match, so
+-- re-key them once instead of leaving a dead entry in the player's list.
+local function NormalizeStoredList(list)
+    local spaced
+    for key, value in pairs(list) do
+        if type(key) == "string" and key:find("%s") then
+            spaced = spaced or {}
+            spaced[key] = value
+        end
+    end
+
+    if not spaced then
+        return
+    end
+
+    for key, value in pairs(spaced) do
+        list[key] = nil
+        local normalized = NormalizeName(key)
+        if normalized and list[normalized] == nil then
+            list[normalized] = value
+        end
+    end
+end
+
+local playerRealmKey
+
+local function GetPlayerRealmKey()
+    if not playerRealmKey then
+        local realm = GetNormalizedRealmName()
+        if type(realm) == "string" and realm ~= "" then
+            playerRealmKey = realm:gsub("%s+", ""):lower()
+        end
+    end
+
+    return playerRealmKey
 end
 
 function LMB:Print(message)
@@ -103,6 +152,14 @@ function LMB:IsAutoReply(message)
     return message:sub(1, #self.autoReplyPrefix) == self.autoReplyPrefix
 end
 
+function LMB:GetPlayerRealmKey()
+    return GetPlayerRealmKey()
+end
+
+function LMB:CleanName(name)
+    return CleanName(name)
+end
+
 function LMB:IsNameListed(list, name)
     local normalized = NormalizeName(name)
     if not normalized then
@@ -113,8 +170,21 @@ function LMB:IsNameListed(list, name)
         return true
     end
 
-    local shortName = normalized:match("^([^-]+)")
-    return shortName ~= normalized and list[shortName] == true
+    local shortName, realm = normalized:match("^([^-]+)%-?(.*)$")
+    if not shortName then
+        return false
+    end
+
+    if realm == "" then
+        -- Same-realm whispers arrive without a realm suffix, so also try the
+        -- qualified form to match entries that were saved as "name-realm".
+        local playerRealm = GetPlayerRealmKey()
+        return playerRealm ~= nil
+            and list[shortName .. "-" .. playerRealm] ~= nil
+    end
+
+    -- An entry saved without a realm matches that name on every realm.
+    return list[shortName] ~= nil
 end
 
 function LMB:SetListed(list, name, value)
@@ -123,7 +193,14 @@ function LMB:SetListed(list, name, value)
         return false
     end
 
-    list[normalized] = value or nil
+    if not value then
+        list[normalized] = nil
+        return true
+    end
+
+    -- Keep the spelling the player entered so the list can show it back to
+    -- them; every lookup goes through the lowercase key instead.
+    list[normalized] = CleanName(name)
     return true
 end
 
@@ -169,6 +246,8 @@ function LMB:HandleSlashCommand(input)
     local command, argument = input:match("^%s*(%S*)%s*(.-)%s*$")
     command = command:lower()
     local normalizedArgument = argument:lower()
+    -- Only ever used by branches that already accepted the name.
+    local cleanedArgument = self:CleanName(argument)
 
     if command == "on" or command == "off" then
         self:SetBlockAllWhispers(command == "on")
@@ -179,14 +258,14 @@ function LMB:HandleSlashCommand(input)
         )
     elseif command == "allow" and self:SetListed(LeaveMeBeDB.allowlist, argument, true) then
         self:SetListed(LeaveMeBeDB.blocklist, argument, false)
-        self:Print("|cffffffff" .. argument .. "|r added to the allowlist.")
+        self:Print("|cffffffff" .. cleanedArgument .. "|r added to the allowlist.")
     elseif command == "unallow" and self:SetListed(LeaveMeBeDB.allowlist, argument, false) then
-        self:Print("|cffffffff" .. argument .. "|r removed from the allowlist.")
+        self:Print("|cffffffff" .. cleanedArgument .. "|r removed from the allowlist.")
     elseif command == "block" and self:SetListed(LeaveMeBeDB.blocklist, argument, true) then
         self:SetListed(LeaveMeBeDB.allowlist, argument, false)
-        self:Print("|cffffffff" .. argument .. "|r added to the blocklist.")
+        self:Print("|cffffffff" .. cleanedArgument .. "|r added to the blocklist.")
     elseif command == "unblock" and self:SetListed(LeaveMeBeDB.blocklist, argument, false) then
-        self:Print("|cffffffff" .. argument .. "|r removed from the blocklist.")
+        self:Print("|cffffffff" .. cleanedArgument .. "|r removed from the blocklist.")
     elseif command == "reply" and normalizedArgument == "reset" then
         LeaveMeBeDB.autoReplyMessage = defaults.autoReplyMessage
         self:Print("the auto-reply was reset.")
@@ -216,6 +295,8 @@ function LMB:Initialize()
     LeaveMeBeDB.enabled = nil
     LeaveMeBeDB.mode = nil
     CopyDefaults(defaults, LeaveMeBeDB)
+    NormalizeStoredList(LeaveMeBeDB.allowlist)
+    NormalizeStoredList(LeaveMeBeDB.blocklist)
     if type(LeaveMeBeDB.minimumLevel) ~= "number"
         or LeaveMeBeDB.minimumLevel < 1
     then

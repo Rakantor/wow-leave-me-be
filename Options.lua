@@ -273,9 +273,12 @@ local function CreateMainPanel()
         for key, checkbox in pairs(checkboxes) do
             checkbox:SetChecked(LeaveMeBeDB[key])
         end
+        -- Stay clickable while automation owns the block, otherwise turning
+        -- automation on would immediately lock its own checkbox.
         SetCheckboxEnabled(
             autoBlockPremadeListing,
             not LeaveMeBeDB.blockAllWhispers
+                or LeaveMeBeDB.premadeAutomationOwnsBlock == true
         )
         local exceptionsEnabled = LeaveMeBeDB.blockAllWhispers
             or LeaveMeBeDB.autoBlockPremadeListing
@@ -302,12 +305,39 @@ local function CreateListPanel(listKey, otherListKey, titleText, descriptionText
     inputLabel:SetPoint("TOPLEFT", description, "BOTTOMLEFT", 0, -20)
     inputLabel:SetText("Character name")
 
-    local input = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
+    local input = CreateFrame(
+        "EditBox",
+        nil,
+        panel,
+        "InputBoxInstructionsTemplate"
+    )
     input:SetPoint("TOPLEFT", inputLabel, "BOTTOMLEFT", 4, -8)
     input:SetSize(330, 30)
     input:SetAutoFocus(false)
     input:SetMaxLetters(100)
     input:SetFontObject(ChatFontNormal)
+    input.Instructions:SetText("Jeff-ArgentDawn")
+
+    -- Names never contain spaces, and dropping them as they are typed shows
+    -- the player the spelling the realm actually uses. Hooked rather than set
+    -- so the template keeps hiding its own placeholder.
+    input:HookScript("OnTextChanged", function(editBox, userInput)
+        if not userInput then
+            return
+        end
+
+        local text = editBox:GetText()
+        local stripped = text:gsub("%s+", "")
+        if stripped == text then
+            return
+        end
+
+        local cursor = editBox:GetCursorPosition()
+        local before = text:sub(1, cursor)
+        local removed = #before - #(before:gsub("%s+", ""))
+        editBox:SetText(stripped)
+        editBox:SetCursorPosition(cursor - removed)
+    end)
 
     local addButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     addButton:SetPoint("LEFT", input, "RIGHT", 12, 0)
@@ -358,10 +388,13 @@ local function CreateListPanel(listKey, otherListKey, titleText, descriptionText
 
     local function Refresh()
         local entries = {}
-        for name in pairs(LeaveMeBeDB[listKey]) do
-            entries[#entries + 1] = name
+        for name, value in pairs(LeaveMeBeDB[listKey]) do
+            -- Entries saved before spellings were kept only hold `true`.
+            entries[#entries + 1] = type(value) == "string" and value or name
         end
-        table.sort(entries)
+        table.sort(entries, function(a, b)
+            return a:lower() < b:lower()
+        end)
 
         emptyText:SetShown(#entries == 0)
 
