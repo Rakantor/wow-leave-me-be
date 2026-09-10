@@ -30,4 +30,5 @@
 Core.lua
 Automation.lua
 Filter.lua
+ChatWindows.lua
 Options.lua

@@ -3,7 +3,8 @@
 ## Project
 
 Leave Me Be is a standalone World of Warcraft: Midnight addon that filters
-incoming player whispers. The current target is retail patch 12.0.7.
+incoming player whispers. The current targets are retail patches 12.0.7 and
+12.1; guard any API that only exists on one of them.
 
 ## References
 
@@ -26,7 +27,9 @@ requirements.
 - Put persistent user preferences in `LeaveMeBeDB`.
 - Store filtered whisper history in the separate `LeaveMeBeLog` SavedVariable.
   Log entries are append-only unless a future retention policy is explicitly
-  requested.
+  requested. An entry's `timestamp` is when the whisper arrived, and an
+  optional `reason` explains a non-standard entry (currently only
+  `level-check-interrupted`).
 - Keep chat event filters free of side effects because WoW can invoke a filter
   once for every chat frame showing the event.
 - Guard chat payloads with `issecretvalue` before comparing, transforming, or
@@ -46,22 +49,41 @@ requirements.
 - `blockAllWhispers` is the main filtering toggle. Explicit blocklist entries
   are still blocked when it is off; friends, guild, group, contacts, and the
   allowlist are exceptions when it is on.
-- Premade Group Finder automation is opt-in. It enables blocking immediately
-  while the player owns an active listing and is the home-group leader (or is
-  the solo listing owner), then disables it after a fixed 15-second grace
-  period. Relisting cancels the pending disable. It must not disable a blocking
-  state that automation did not enable, and turning the automation off must
-  hand back a blocking state that it did enable.
+- Premade Group Finder automation is opt-in. It enables blocking after the
+  player appears to own an active listing as home-group leader (or solo owner)
+  for one second. Keep this settling delay: accepting an invite can briefly
+  report an active listing before the home-group roster arrives. Blocking is
+  disabled after a fixed 15-second grace period. Relisting cancels the pending
+  disable. It must not disable a blocking state that automation did not enable,
+  and turning automation off must hand back a blocking state that it did enable.
 - The level exception defaults to enabled with `minimumLevel = 42`. Unknown
   levels are resolved asynchronously through a temporary character-friend
   entry marked `LeaveMeBe:level-check`; remove that entry after resolving or
-  timing out, and do not log or auto-reply until the result is known.
+  timing out, and do not log or auto-reply until the result is known. The one
+  exception is logout, which ends every lookup in flight: log those whispers
+  with `reason = "level-check-interrupted"` and send no reply.
+- Resolved levels are cached per session. A level at or above the minimum
+  never expires (levels only rise); a lower level expires after 60 seconds so
+  a level-up can be discovered, and a failed lookup is retried after 30
+  seconds. The live friends list always takes precedence over the cache.
 - A character friend can only be added on our own realm or a connected one,
   and only while the friends list has room, so do not start a level lookup
   that cannot succeed. Treat an unresolvable level as "no exception applies"
   rather than hiding the whisper until the lookup times out. `ERR_FRIEND_LIST_FULL`
   is the only signal the client gives for a failed add; give up on the checks
   in flight without caching a level so they can be retried once a slot frees.
+  Character friends can also be unavailable altogether (12.1 without the
+  legacy friend system); then no lookup can start, and the addon explains
+  this once per session, as it does for a full list.
+- Hide only the system messages the automatic friend add or remove produces,
+  matched by exact text for that friend's name, never every system message
+  in a time window. The add-side window must cover the whole lookup timeout
+  because the add is confirmed asynchronously.
+- Whisper popouts (`whisperMode` popout or popout-and-inline) are opened by
+  Blizzard before message filters run. `ChatWindows.lua` closes a window that
+  was opened for a filtered whisper and is still empty, and reopens one when a
+  deferred whisper is replayed after its level resolves. Never close a window
+  that already holds messages or that was not opened for the filtered event.
 - Keep the automatic reply editor on the main settings page. Keep allowlist
   and blocklist management in their own canvas subcategories.
 - Prefer local functions and the addon namespace (`local _, LMB = ...`) over

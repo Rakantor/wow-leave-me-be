@@ -3,9 +3,21 @@ local _, LMB = ...
 local TEMP_FRIEND_NOTE = "LeaveMeBe:level-check"
 local FRIEND_ONLINE_SOUND = 567518
 local LEVEL_LOOKUP_TIMEOUT = 5
+local LEVEL_CACHE_TTL = 60
+local FAILED_LOOKUP_RETRY_DELAY = 30
+local FRIEND_MESSAGE_GRACE = 2
 local AUTO_REPLY_COOLDOWN = 60
 
-local pendingAutoReplies = 0
+-- System messages an automatic friend add or remove can produce. Templates
+-- take the friend's name; the plain strings are add failures, which the
+-- addon explains itself where they matter.
+local FRIEND_MESSAGE_KEYS = {
+    "ERR_FRIEND_ADDED_S", "ERR_FRIEND_REMOVED_S", "ERR_FRIEND_ALREADY_S",
+    "ERR_FRIEND_ONLINE_SS", "ERR_FRIEND_OFFLINE_S",
+    "ERR_FRIEND_NOT_FOUND", "ERR_FRIEND_WRONG_FACTION", "ERR_FRIEND_SELF",
+    "ERR_FRIEND_ERROR", "ERR_FRIEND_DB_ERROR", "ERR_FRIEND_LIST_FULL",
+}
+
 local autoReplyCooldowns = {}
 local pendingLevelChecks = {}
 local temporaryLevelChecks = {}
@@ -15,7 +27,47 @@ local reachableRealms = {}
 local friendSoundMuted = false
 local friendListFull = false
 local friendListFullCount = 0
-local suppressSystemMessagesUntil = 0
+local friendListUnavailableReported = false
+local suppressedSystemMessages = {}
+local loggingOut = false
+
+-- RequiresFriendList APIs may return nothing when character friends are
+-- unavailable. A missing list is not an empty list that can accept friends.
+local function GetFriendCount()
+    if C_FriendList.IsLegacyFriendSystemEnabled
+        and not C_FriendList.IsLegacyFriendSystemEnabled()
+    then
+        return nil
+    end
+    local count = C_FriendList.GetNumFriends()
+    return type(count) == "number" and count or nil
+end
+
+-- An add is only confirmed asynchronously, so its messages are hidden for
+-- the whole lookup lifetime; a removal only needs a short grace period. A
+-- longer window already in place is never shortened.
+local function SuppressFriendMessages(name, duration)
+    local expiresAt = GetTime() + duration
+    local messages = {}
+    for _, key in ipairs(FRIEND_MESSAGE_KEYS) do
+        local template = _G[key]
+        if type(template) == "string" then
+            local message = template:format(name, name)
+            local current = suppressedSystemMessages[message]
+            if not current or current < expiresAt then
+                suppressedSystemMessages[message] = expiresAt
+                messages[#messages + 1] = message
+            end
+        end
+    end
+    C_Timer.After(duration, function()
+        for _, message in ipairs(messages) do
+            if suppressedSystemMessages[message] == expiresAt then
+                suppressedSystemMessages[message] = nil
+            end
+        end
+    end)
+end
 
 local function NormalizeRealm(realm)
     if type(realm) ~= "string" or realm == "" then
@@ -86,18 +138,23 @@ local function GetLookupKey(sender, guid)
 end
 
 local function GetCachedLevel(sender, guid)
-    if guid and levelsByGUID[guid] ~= nil then
-        return levelsByGUID[guid]
-    end
-
     local lookupName = GetLookupName(sender)
-    if levelsByName[lookupName] ~= nil then
-        return levelsByName[lookupName]
-    end
-
+    -- The live friends list can know about a level-up before our cache expires.
     local info = C_FriendList.GetFriendInfo(lookupName)
     if info and type(info.level) == "number" and info.level > 0 then
         return info.level
+    end
+
+    -- A level only ever rises, so a result that already passes the threshold
+    -- never needs another lookup; only lower levels are re-checked.
+    local cached = guid and levelsByGUID[guid] or levelsByName[lookupName]
+    if cached
+        and (
+            cached.level >= LeaveMeBeDB.minimumLevel
+            or GetTime() < cached.expiresAt
+        )
+    then
+        return cached.level
     end
 end
 
@@ -106,7 +163,7 @@ end
 -- friends list has room. Anyone else can never be resolved, so do not start a
 -- lookup that is guaranteed to time out.
 local function CanResolveLevel(sender)
-    if friendListFull then
+    if friendListFull or GetFriendCount() == nil or loggingOut then
         return false
     end
 
@@ -118,7 +175,7 @@ local function CanResolveLevel(sender)
     return reachableRealms[realm] == true
 end
 
-function LMB:EvaluateWhisper(sender, guid, specialFlags)
+function LMB:EvaluateWhisper(sender, guid, specialFlags, skipLevelLookup)
     -- Chat payloads can be secret during Midnight's messaging lockdown.
     -- Secret values cannot safely be compared, indexed, or transformed.
     if self:IsSecretValue(sender)
@@ -155,11 +212,13 @@ function LMB:EvaluateWhisper(sender, guid, specialFlags)
         if level and level >= LeaveMeBeDB.minimumLevel then
             return "allow"
         end
-        needsLevelLookup = not level and CanResolveLevel(sender)
+        needsLevelLookup = not level
+            and not skipLevelLookup
+            and CanResolveLevel(sender)
     end
 
     if LeaveMeBeDB.allowContacts
-        and self:IsNameListed(self.sessionContacts, sender)
+        and self.sessionContacts[self:GetCharacterKey(sender)] ~= nil
     then
         return "allow"
     end
@@ -202,14 +261,15 @@ local function GetPlayerName()
     return name
 end
 
-local function LogWhisper(message, sender, guid, lineID)
+local function LogWhisper(message, sender, guid, lineID, timestamp, reason)
     LeaveMeBeLog[#LeaveMeBeLog + 1] = {
-        timestamp = time(),
+        timestamp = timestamp or time(),
         character = GetPlayerName(),
         sender = sender,
         message = message,
         guid = guid,
         lineID = lineID,
+        reason = reason,
     }
 end
 
@@ -234,19 +294,18 @@ local function SendAutomaticReply(message, sender)
         autoReplyCooldowns[senderKey] = nil
     end)
 
-    pendingAutoReplies = pendingAutoReplies + 1
     C_ChatInfo.SendChatMessage(reply, "WHISPER", nil, sender)
-    C_Timer.After(1, function()
-        pendingAutoReplies = math.max(0, pendingAutoReplies - 1)
-    end)
 end
 
-local function BlockWhisper(message, sender, guid, lineID)
-    LogWhisper(message, sender, guid, lineID)
+local function BlockWhisper(message, sender, guid, lineID, timestamp)
+    LogWhisper(message, sender, guid, lineID, timestamp)
     SendAutomaticReply(message, sender)
 end
 
 local function ReplayWhisper(entry)
+    if LMB.PrepareWhisperWindow then
+        LMB:PrepareWhisperWindow(entry.sender)
+    end
     local frames = { GetFramesRegisteredForEvent("CHAT_MSG_WHISPER") }
     for index = 1, #frames do
         local frame = frames[index]
@@ -290,22 +349,24 @@ local function FlushLevelCheck(record)
         local decision = LMB:EvaluateWhisper(
             entry.sender,
             entry.guid,
-            entry.specialFlags
+            entry.specialFlags,
+            true
         )
-        if decision == "allow" then
+        if loggingOut then
+            LogWhisper(entry.message, entry.sender, entry.guid, entry.lineID,
+                entry.timestamp, "level-check-interrupted")
+        elseif decision == "allow" then
             ReplayWhisper(entry)
         else
-            BlockWhisper(
-                entry.message,
-                entry.sender,
-                entry.guid,
-                entry.lineID
-            )
+            BlockWhisper(entry.message, entry.sender, entry.guid,
+                entry.lineID, entry.timestamp)
         end
     end
 
     C_Timer.After(2, function()
-        temporaryLevelChecks[record.key] = nil
+        if temporaryLevelChecks[record.key] == record then
+            temporaryLevelChecks[record.key] = nil
+        end
     end)
     FinishFriendSoundSuppression()
 end
@@ -317,10 +378,15 @@ local function ResolveLevelCheck(record, level)
 
     pendingLevelChecks[record.key] = nil
     local resolvedLevel = type(level) == "number" and level > 0 and level or 0
+    local duration = resolvedLevel > 0 and LEVEL_CACHE_TTL or FAILED_LOOKUP_RETRY_DELAY
+    local cached = {
+        level = resolvedLevel,
+        expiresAt = GetTime() + duration,
+    }
     if record.guid then
-        levelsByGUID[record.guid] = resolvedLevel
+        levelsByGUID[record.guid] = cached
     end
-    levelsByName[record.lookupName] = resolvedLevel
+    levelsByName[record.lookupName] = cached
 
     FlushLevelCheck(record)
 end
@@ -337,7 +403,7 @@ local function AbandonLevelCheck(record)
 end
 
 local function RemoveTemporaryFriend(record)
-    for index = C_FriendList.GetNumFriends(), 1, -1 do
+    for index = GetFriendCount() or 0, 1, -1 do
         local info = C_FriendList.GetFriendInfoByIndex(index)
         if info
             and info.notes == TEMP_FRIEND_NOTE
@@ -346,18 +412,29 @@ local function RemoveTemporaryFriend(record)
                 or GetLookupName(info.name) == record.lookupName
             )
         then
-            suppressSystemMessagesUntil = math.max(
-                suppressSystemMessagesUntil,
-                GetTime() + 2
-            )
+            SuppressFriendMessages(info.name, FRIEND_MESSAGE_GRACE)
             C_FriendList.RemoveFriendByIndex(index)
             return
         end
     end
 end
 
+-- Nothing in flight can resolve any more, so stop hiding those whispers
+-- instead of leaving them in limbo until the lookup times out.
+local function AbandonAllLevelChecks()
+    local records = {}
+    for _, record in pairs(pendingLevelChecks) do
+        records[#records + 1] = record
+    end
+
+    for index = 1, #records do
+        RemoveTemporaryFriend(records[index])
+        AbandonLevelCheck(records[index])
+    end
+end
+
 local function HandleFriendListFull()
-    friendListFullCount = C_FriendList.GetNumFriends()
+    friendListFullCount = GetFriendCount()
 
     if not friendListFull then
         friendListFull = true
@@ -368,17 +445,28 @@ local function HandleFriendListFull()
         )
     end
 
-    -- Nothing in flight can resolve now, so stop hiding those whispers instead
-    -- of leaving them in limbo until the lookup times out.
-    local records = {}
-    for _, record in pairs(pendingLevelChecks) do
-        records[#records + 1] = record
+    AbandonAllLevelChecks()
+end
+
+-- Character friends can be unavailable altogether (12.1 without the legacy
+-- friend system). Explain once why a blocked player was not level-checked,
+-- as HandleFriendListFull does for a full list.
+local function ReportUnavailableFriendList(sender, guid)
+    if friendListUnavailableReported
+        or loggingOut
+        or not LeaveMeBeDB.allowByLevel
+        or not LeaveMeBeDB.blockAllWhispers
+        or GetCachedLevel(sender, guid) ~= nil
+        or GetFriendCount() ~= nil
+    then
+        return
     end
 
-    for index = 1, #records do
-        RemoveTemporaryFriend(records[index])
-        AbandonLevelCheck(records[index])
-    end
+    friendListUnavailableReported = true
+    LMB:Print(
+        "character friends are unavailable, so unknown players cannot be "
+            .. "checked against the minimum level."
+    )
 end
 
 local function QueueLevelCheck(...)
@@ -396,7 +484,7 @@ local function QueueLevelCheck(...)
             entries = {},
         }
         pendingLevelChecks[key] = record
-        temporaryLevelChecks[key] = true
+        temporaryLevelChecks[key] = record
     end
 
     record.entries[#record.entries + 1] = {
@@ -405,6 +493,7 @@ local function QueueLevelCheck(...)
         specialFlags = specialFlags,
         lineID = lineID,
         guid = guid,
+        timestamp = time(),
         count = select("#", ...),
         args = { ... },
     }
@@ -414,29 +503,30 @@ local function QueueLevelCheck(...)
             MuteSoundFile(FRIEND_ONLINE_SOUND)
             friendSoundMuted = true
         end
-        suppressSystemMessagesUntil = math.max(
-            suppressSystemMessagesUntil,
-            GetTime() + 2
-        )
-        C_FriendList.AddFriend(record.lookupName, TEMP_FRIEND_NOTE)
-
+        -- Arm cleanup before requesting the asynchronous operation.
         C_Timer.After(LEVEL_LOOKUP_TIMEOUT, function()
             if pendingLevelChecks[key] == record then
                 RemoveTemporaryFriend(record)
                 ResolveLevelCheck(record)
             end
         end)
+        SuppressFriendMessages(
+            record.lookupName,
+            LEVEL_LOOKUP_TIMEOUT + FRIEND_MESSAGE_GRACE
+        )
+        C_FriendList.AddFriend(record.lookupName, TEMP_FRIEND_NOTE)
     end
 end
 
 local function ProcessFriendListUpdate()
     -- Any change in size means a slot may have opened up, so allow lookups
     -- again. A still-full list simply reports the error once more.
-    if friendListFull and C_FriendList.GetNumFriends() ~= friendListFullCount then
+    local count = GetFriendCount()
+    if friendListFull and count and count ~= friendListFullCount then
         friendListFull = false
     end
 
-    for index = C_FriendList.GetNumFriends(), 1, -1 do
+    for index = count or 0, 1, -1 do
         local info = C_FriendList.GetFriendInfoByIndex(index)
         if info and info.notes == TEMP_FRIEND_NOTE then
             local lookupName = GetLookupName(info.name)
@@ -453,17 +543,11 @@ local function ProcessFriendListUpdate()
             end
 
             if record and type(info.level) == "number" and info.level > 0 then
-                suppressSystemMessagesUntil = math.max(
-                    suppressSystemMessagesUntil,
-                    GetTime() + 2
-                )
+                SuppressFriendMessages(info.name, FRIEND_MESSAGE_GRACE)
                 C_FriendList.RemoveFriendByIndex(index)
                 ResolveLevelCheck(record, info.level)
             elseif not record then
-                suppressSystemMessagesUntil = math.max(
-                    suppressSystemMessagesUntil,
-                    GetTime() + 2
-                )
+                SuppressFriendMessages(info.name, FRIEND_MESSAGE_GRACE)
                 C_FriendList.RemoveFriendByIndex(index)
             end
         end
@@ -490,11 +574,15 @@ local function IncomingWhisperFilter(
 end
 
 local function OutgoingWhisperFilter(_, _, message)
-    return pendingAutoReplies > 0 or LMB:IsAutoReply(message)
+    return LMB:IsAutoReply(message)
 end
 
-local function SystemMessageFilter()
-    return GetTime() < suppressSystemMessagesUntil
+local function SystemMessageFilter(_, _, message)
+    if LMB:IsSecretValue(message) then
+        return false
+    end
+    local expiresAt = suppressedSystemMessages[message]
+    return expiresAt ~= nil and GetTime() < expiresAt
 end
 
 local eventFrame = CreateFrame("Frame")
@@ -522,6 +610,7 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
             QueueLevelCheck(...)
         elseif decision == "block" then
             BlockWhisper(message, sender, guid, lineID)
+            ReportUnavailableFriendList(sender, guid)
         end
     elseif event == "FRIENDLIST_UPDATE" then
         ProcessFriendListUpdate()
@@ -535,9 +624,15 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
         then
             HandleFriendListFull()
         end
-    elseif event == "PLAYER_LOGOUT" and friendSoundMuted then
-        UnmuteSoundFile(FRIEND_ONLINE_SOUND)
-        friendSoundMuted = false
+    elseif event == "PLAYER_LOGOUT" then
+        -- Logout ends the lookup just like a timeout. Preserve the filtered
+        -- messages before SavedVariables are written, without sending replies.
+        loggingOut = true
+        AbandonAllLevelChecks()
+        if friendSoundMuted then
+            UnmuteSoundFile(FRIEND_ONLINE_SOUND)
+            friendSoundMuted = false
+        end
     end
 end)
 
@@ -546,12 +641,14 @@ contactFrame:RegisterEvent("CHAT_MSG_WHISPER_INFORM")
 contactFrame:SetScript("OnEvent", function(_, _, message, recipient)
     if LMB:IsSecretValue(message)
         or LMB:IsSecretValue(recipient)
-        or pendingAutoReplies > 0
         or LMB:IsAutoReply(message)
     then
         return
     end
-    LMB:SetListed(LMB.sessionContacts, recipient, true)
+    local key = LMB:GetCharacterKey(recipient)
+    if key then
+        LMB.sessionContacts[key] = true
+    end
 end)
 
 function LMB:RegisterWhisperFilter()

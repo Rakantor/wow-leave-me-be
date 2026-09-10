@@ -160,13 +160,31 @@ function LMB:CleanName(name)
     return CleanName(name)
 end
 
+function LMB:GetCharacterKey(name)
+    if self:IsSecretValue(name) then
+        return nil
+    end
+    local normalized = NormalizeName(name)
+    if not normalized then
+        return nil
+    end
+    if not normalized:find("-", 1, true) then
+        local realm = GetPlayerRealmKey()
+        if not realm then
+            return nil
+        end
+        normalized = normalized .. "-" .. realm
+    end
+    return normalized
+end
+
 function LMB:IsNameListed(list, name)
     local normalized = NormalizeName(name)
     if not normalized then
         return false
     end
 
-    if list[normalized] then
+    if list[normalized] ~= nil then
         return true
     end
 
@@ -316,6 +334,7 @@ function LMB:Initialize()
     end
 
     self:RegisterWhisperFilter()
+    self:RegisterWhisperWindows()
     self:RegisterPremadeAutomation()
     self:RegisterOptions()
 end

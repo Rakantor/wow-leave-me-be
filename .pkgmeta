@@ -3,3 +3,4 @@ package-as: LeaveMeBe
 ignore:
   - release.sh
   - AGENTS.md
+  - tests

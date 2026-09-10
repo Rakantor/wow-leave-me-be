@@ -40,4 +40,4 @@ Configure the addon under **Options → AddOns → Leave Me Be**.
 ## Inspiration
 
 Leave Me Be was inspired by
-[BadBoy Levels](https://github.com/funkydude/BadBoy_Levels).
+[BadBoy_Levels](https://github.com/funkydude/BadBoy_Levels).
