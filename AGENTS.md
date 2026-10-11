@@ -3,8 +3,8 @@
 ## Project
 
 Leave Me Be is a standalone World of Warcraft: Midnight addon that filters
-incoming player whispers. The current targets are retail patches 12.0.7 and
-12.1; guard any API that only exists on one of them.
+incoming player whispers. The current targets are retail patches 12.1 and
+12.1.5; guard any API that only exists on one of them.
 
 ## References
 
